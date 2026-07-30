@@ -42,7 +42,7 @@ logger = logging.getLogger("SkyMoviesHDBackend")
 app = FastAPI(
     title="SkyMoviesHD Universal GDFlix Scraper API",
     description="Pure REST API backend to scrape SkyMoviesHD movies, search catalog, browse web series, and extract GDFlix cloud download links from any URL.",
-    version="2.1.0",
+    version="2.2.0",
     docs_url="/docs",
     redoc_url="/redoc"
 )
@@ -67,7 +67,7 @@ async def serve_root():
     """Returns JSON Service Info and available REST API endpoints."""
     return {
         "service": "SkyMoviesHD Universal GDFlix Scraper API",
-        "version": "2.1.0",
+        "version": "2.2.0",
         "status": "online",
         "swagger_documentation": "/docs",
         "redoc_documentation": "/redoc",
