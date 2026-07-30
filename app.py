@@ -7,6 +7,10 @@ Render / Heroku / Railway Deployment Ready REST API Service (No UI).
 Endpoints:
   - GET  /                        -> JSON Health Check & Endpoints Overview
   - GET  /docs                    -> Swagger UI Interactive API Documentation
+  - GET  /api/home                -> Homepage Popular, Latest & Categories with GDFlix links
+  - GET  /api/search              -> Search movies/web series by keyword (?query=...&cat=All)
+  - GET  /api/web_series          -> Dedicated route for All Web Series (?start_page=1&end_page=2)
+  - GET  /api/movie               -> Scrape single movie details page (?url=https://...)
   - GET  /api/extract_gdflix      -> Universal extractor for ANY URL (?url=https://...)
   - GET  /api/latest              -> Returns JSON of newest 2026/2025 movies with GDFlix links
   - GET  /api/category            -> Multi-page category scraper (?name=Bollywood&start_page=1&end_page=2)
@@ -37,8 +41,8 @@ logger = logging.getLogger("SkyMoviesHDBackend")
 
 app = FastAPI(
     title="SkyMoviesHD Universal GDFlix Scraper API",
-    description="Pure REST API backend to scrape SkyMoviesHD movies and extract GDFlix cloud download links from any URL.",
-    version="2.0.0",
+    description="Pure REST API backend to scrape SkyMoviesHD movies, search catalog, browse web series, and extract GDFlix cloud download links from any URL.",
+    version="2.1.0",
     docs_url="/docs",
     redoc_url="/redoc"
 )
@@ -63,18 +67,136 @@ async def serve_root():
     """Returns JSON Service Info and available REST API endpoints."""
     return {
         "service": "SkyMoviesHD Universal GDFlix Scraper API",
-        "version": "2.0.0",
+        "version": "2.1.0",
         "status": "online",
         "swagger_documentation": "/docs",
         "redoc_documentation": "/redoc",
         "endpoints": {
-            "extract_gdflix": "/api/extract_gdflix?url={any_url}",
+            "home_page": "/api/home",
+            "search_movies_web_series": "/api/search?query={keyword}&cat=All",
+            "web_series_category": "/api/web_series?start_page=1&end_page=2",
+            "single_movie_details": "/api/movie?url={movie_page_url}",
+            "extract_gdflix_universal": "/api/extract_gdflix?url={any_url}",
             "latest_movies": "/api/latest?limit={optional_limit}",
             "category_scraper": "/api/category?name=Bollywood Movies&start_page=1&end_page=2",
             "list_categories": "/api/categories",
             "export_last_scrape": "/api/export/{json|csv|md}"
         }
     }
+
+
+@app.get("/api/home", response_class=JSONResponse)
+async def api_homepage():
+    """
+    1. HOME PAGE ROUTE:
+    Returns Homepage MOST POPULAR MOVIES, Latest Updated Movies, and all 22 Categories
+    with GDFlix download links.
+    """
+    global last_scraped_catalog
+    try:
+        logger.info("API Request -> homepage content")
+        data = scraper.get_homepage_content()
+        popular_detailed = scraper.scrape_movies_concurrently(data["popular_movies"])
+        latest_detailed = scraper.scrape_movies_concurrently(data["latest_movies"])
+        last_scraped_catalog = popular_detailed + latest_detailed
+        return {
+            "status": "success",
+            "popular_count": len(popular_detailed),
+            "latest_count": len(latest_detailed),
+            "categories_count": len(data["categories"]),
+            "popular_movies": popular_detailed,
+            "latest_movies": latest_detailed,
+            "categories": data["categories"]
+        }
+    except Exception as e:
+        logger.error(f"Error fetching homepage: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/search", response_class=JSONResponse)
+async def api_search(
+    query: str = Query(..., description="Keyword to search (e.g. 'chopsticks', 'marvel', 'pushpa')"),
+    cat: str = Query("All", description="Category filter (All, Bollywood Movies, All Web Series, etc.)"),
+    limit: Optional[int] = Query(None, description="Optional cap on results")
+):
+    """
+    2. SEARCH ROUTE:
+    Searches movies & web series by keyword and extracts GDFlix links concurrently.
+    """
+    global last_scraped_catalog
+    try:
+        logger.info(f"API Request -> search for '{query}' (cat: '{cat}')")
+        movie_items = scraper.search_movies(query=query, cat=cat)
+        if limit:
+            movie_items = movie_items[:limit]
+        detailed = scraper.scrape_movies_concurrently(movie_items)
+        last_scraped_catalog = detailed
+        return {
+            "status": "success",
+            "query": query,
+            "category_filter": cat,
+            "total_results": len(detailed),
+            "movies": detailed
+        }
+    except Exception as e:
+        logger.error(f"Error searching for '{query}': {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/web_series", response_class=JSONResponse)
+async def api_web_series(
+    start_page: int = Query(1, ge=1, le=100, description="Start page number"),
+    end_page: int = Query(2, ge=1, le=100, description="End page number"),
+    limit: Optional[int] = Query(None, description="Optional cap on results")
+):
+    """
+    3. WEB SERIES ROUTE:
+    Dedicated route for 'All Web Series' category across multiple pages with GDFlix links.
+    """
+    global last_scraped_catalog
+    try:
+        logger.info(f"API Request -> web_series (p{start_page} to p{end_page})")
+        cat_url = f"{scraper.base_url}/category/All-Web-Series.html"
+        movie_items = scraper.scrape_category_pages(
+            category_url=cat_url,
+            start_page=start_page,
+            end_page=end_page
+        )
+        if limit:
+            movie_items = movie_items[:limit]
+        detailed = scraper.scrape_movies_concurrently(movie_items)
+        last_scraped_catalog = detailed
+        return {
+            "status": "success",
+            "category": "All Web Series",
+            "start_page": start_page,
+            "end_page": end_page,
+            "total_web_series": len(detailed),
+            "web_series": detailed
+        }
+    except Exception as e:
+        logger.error(f"Error scraping web series: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/movie", response_class=JSONResponse)
+async def api_movie_details(
+    url: str = Query(..., description="SkymoviesHD Movie Details Page URL (e.g. https://skymovieshd.ceo/movie/...html)")
+):
+    """
+    4. MOVIE DETAILS & GDFLIX ROUTE:
+    Scrapes a single movie details page and extracts all GDFlix direct links & backup links.
+    """
+    try:
+        logger.info(f"API Request -> movie details for {url}")
+        res = scraper.scrape_movie_details({"movie_url": url, "title": "Movie Details Page"})
+        return {
+            "status": "success",
+            "movie": res
+        }
+    except Exception as e:
+        logger.error(f"Error scraping movie {url}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/extract_gdflix", response_class=JSONResponse)

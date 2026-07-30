@@ -2,12 +2,13 @@
 """
 SkyMoviesHD.ceo Universal Scraper & GDFlix Extractor
 ----------------------------------------------------
-Universal extractor ("khi par bhi sare links me se gdflix ki link ko nikal kar dega"):
-  - Universal GDFlix link extraction from ANY URL (Movie details, Category page, HowBlogs redirect, Homepage, or Direct link)
+Universal extractor and specialized scraping routes:
+  - Universal GDFlix link extraction from ANY URL
+  - Search movies/web series by keyword (`search.php`)
+  - Homepage latest & popular movies extraction
+  - Dedicated Web Series scraper
   - Multi-page category scraping (Page 1, 2, 3, 4...)
-  - Newest / Latest 2026 & 2025 releases discovery
   - High-performance concurrent extraction (ThreadPoolExecutor)
-  - Exports to JSON, CSV, and Markdown
 
 Author: AI Assistant (Arena.ai)
 Date: 2026-07-30
@@ -20,7 +21,7 @@ import json
 import time
 import logging
 import argparse
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
@@ -62,6 +63,84 @@ class SkyMoviesHDScraper:
                     time.sleep(0.4 * (attempt + 1))
         return None
 
+    def search_movies(self, query, cat="All"):
+        """Searches movies/web series on skymovieshd.ceo using search.php."""
+        logger.info(f"Searching for '{query}' (category: {cat})...")
+        url = f"{self.base_url}/search.php"
+        resp = self._get(url, params={"search": query, "cat": cat})
+        if not resp:
+            return []
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+        movies = []
+        seen_urls = set()
+
+        for a in soup.find_all("a", href=True):
+            href = a["href"].strip()
+            if "/movie/" in href:
+                full_url = urljoin(f"{self.base_url}/", href)
+                title = a.text.strip()
+                if full_url not in seen_urls and title:
+                    seen_urls.add(full_url)
+                    year_match = re.search(r"\((\d{4})\)", title)
+                    year = int(year_match.group(1)) if year_match else 0
+                    movies.append({
+                        "title": title,
+                        "movie_url": full_url,
+                        "page_found": 1,
+                        "year": year,
+                        "category": f"Search: {query}"
+                    })
+
+        logger.info(f"Search found {len(movies)} movies.")
+        return movies
+
+    def get_homepage_content(self):
+        """Scrapes homepage MOST POPULAR MOVIES and Latest Updated Movies."""
+        logger.info(f"Fetching homepage content from {self.base_url}/")
+        resp = self._get(f"{self.base_url}/")
+        if not resp:
+            return {"popular_movies": [], "latest_movies": [], "categories": []}
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+        popular_movies = []
+        latest_movies = []
+        seen_popular = set()
+        seen_latest = set()
+
+        # Popular movies are usually under "MOST POPULAR MOVIES"
+        # Let's check div.Let vs div.Fmvideo
+        for a in soup.find_all("a", href=True):
+            href = a["href"].strip()
+            title = a.text.strip()
+            if "/movie/" in href or (href.startswith("movie/") and href.endswith(".html")):
+                full_url = urljoin(f"{self.base_url}/", href)
+                year_match = re.search(r"\((\d{4})\)", title)
+                year = int(year_match.group(1)) if year_match else 0
+                item = {
+                    "title": title,
+                    "movie_url": full_url,
+                    "year": year,
+                    "category": "Homepage"
+                }
+                # If parent div has class Let, it's typically popular
+                parent_class = a.parent.parent.get("class", []) if a.parent and a.parent.parent else []
+                if "Let" in parent_class:
+                    if full_url not in seen_popular:
+                        seen_popular.add(full_url)
+                        popular_movies.append(item)
+                else:
+                    if full_url not in seen_latest:
+                        seen_latest.add(full_url)
+                        latest_movies.append(item)
+
+        categories = self.get_categories()
+        return {
+            "popular_movies": popular_movies,
+            "latest_movies": latest_movies,
+            "categories": categories
+        }
+
     def universal_gdflix_extractor(self, url):
         """
         Universal GDFlix Link Extractor:
@@ -75,7 +154,6 @@ class SkyMoviesHDScraper:
 
         logger.info(f"Universal GDFlix extraction for URL: {url}")
 
-        # Case 1: Already a direct gdflix link
         if "gdflix" in url.lower():
             return [{
                 "title": "Direct GDFlix Link",
@@ -85,7 +163,6 @@ class SkyMoviesHDScraper:
                 "type": "direct_link"
             }]
 
-        # Case 2: Intermediate redirect shortener page (e.g. howblogs.xyz, tpead.net)
         if any(domain in url.lower() for domain in ["howblogs", "tpead", "skybap", "drive"]):
             resp = self._get(url)
             results = []
@@ -93,7 +170,6 @@ class SkyMoviesHDScraper:
                 soup = BeautifulSoup(resp.text, "html.parser")
                 page_title = soup.title.text.strip() if soup.title else "Redirect Shortener Page"
                 seen = set()
-                # Find direct gdflix links
                 for a in soup.find_all("a", href=True):
                     href = a["href"].strip()
                     if "gdflix" in href and href not in seen:
@@ -105,7 +181,6 @@ class SkyMoviesHDScraper:
                             "source_url": url,
                             "type": "shortener_redirect"
                         })
-                # If no gdflix found, add backup cloud links
                 if not results:
                     for a in soup.find_all("a", href=True):
                         href = a["href"].strip()
@@ -120,7 +195,6 @@ class SkyMoviesHDScraper:
                             })
             return results
 
-        # Case 3: SkymoviesHD Movie Details Page (/movie/...)
         if "/movie/" in url:
             movie_res = self.scrape_movie_details({"movie_url": url, "title": "Movie Page"})
             results = []
@@ -135,7 +209,6 @@ class SkyMoviesHDScraper:
                     "source_url": url,
                     "type": "movie_detail"
                 })
-            # Also add backup links if requested or if gdflix is empty
             if not results:
                 for o in movie_res.get("other_cloud_links", []):
                     results.append({
@@ -148,7 +221,6 @@ class SkyMoviesHDScraper:
                     })
             return results
 
-        # Case 4: SkymoviesHD Category Listing Page (/category/...) or Homepage
         if "category/" in url or url.rstrip("/") == self.base_url:
             resp = self._get(url)
             if not resp:
@@ -167,7 +239,6 @@ class SkyMoviesHDScraper:
                             "movie_url": full_url,
                             "page_found": 1
                         })
-            # Cap at 25 for rapid UI response
             detailed = self.scrape_movies_concurrently(movie_items[:25])
             results = []
             for m in detailed:
@@ -182,7 +253,6 @@ class SkyMoviesHDScraper:
                     })
             return results
 
-        # Case 5: Any other arbitrary webpage - scan for gdflix or shorteners and resolve
         resp = self._get(url)
         results = []
         if resp:
@@ -207,7 +277,6 @@ class SkyMoviesHDScraper:
                     if href not in [s[1] for s in shorteners]:
                         shorteners.append((label, href))
 
-            # Follow discovered shorteners concurrently
             if shorteners:
                 with ThreadPoolExecutor(max_workers=5) as executor:
                     futures = [executor.submit(self.universal_gdflix_extractor, s_url) for _, s_url in shorteners]
@@ -307,7 +376,6 @@ class SkyMoviesHDScraper:
         all_movies = []
         seen_urls = set()
 
-        # 1. Homepage latest & popular
         resp = self._get(f"{self.base_url}/")
         if resp:
             soup = BeautifulSoup(resp.text, "html.parser")
@@ -328,7 +396,6 @@ class SkyMoviesHDScraper:
                             "category": "Homepage (Latest/Popular)"
                         })
 
-        # 2. Page 1 of top active categories
         top_category_slugs = [
             "Bollywood-Movies.html",
             "South-Indian-Hindi-Dubbed-Movies.html",
@@ -366,7 +433,6 @@ class SkyMoviesHDScraper:
 
         soup = BeautifulSoup(resp.text, "html.parser")
 
-        # 1. Title refinement
         title = movie_item.get("title")
         t_div = soup.find("div", class_="Robiul")
         if t_div and t_div.find("b"):
@@ -379,7 +445,6 @@ class SkyMoviesHDScraper:
         year_match = re.search(r"\((\d{4})\)", title)
         year = int(year_match.group(1)) if year_match else movie_item.get("year", 0)
 
-        # 2. Extract Poster Image
         poster = None
         m_list = soup.find("div", class_="movielist")
         if m_list and m_list.find("img"):
@@ -391,7 +456,6 @@ class SkyMoviesHDScraper:
                     poster = src
                     break
 
-        # 3. Extract Metadata
         metadata = {}
         for div in soup.find_all("div", class_="Let"):
             text = div.text.strip()
@@ -399,7 +463,6 @@ class SkyMoviesHDScraper:
                 parts = text.split(":", 1)
                 metadata[parts[0].strip().lower()] = parts[1].strip()
 
-        # 4. Find Redirect / Download Link Shorteners
         redirect_links = []
         seen_redirects = set()
         for a in soup.find_all("a", href=True):
@@ -410,7 +473,6 @@ class SkyMoviesHDScraper:
                     seen_redirects.add(href)
                     redirect_links.append({"label": text, "redirect_url": href})
 
-        # 5. Follow redirects to extract GDFlix links and other cloud host links
         gdflix_links = []
         other_cloud_links = []
         seen_gdflix = set()
@@ -578,9 +640,11 @@ class SkyMoviesHDScraper:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="SkyMoviesHD Scraper (Homepage Categories, Multi-Page, Universal GDFlix Extractor)")
+    parser = argparse.ArgumentParser(description="SkyMoviesHD Scraper (Homepage, Search, Web Series, Multi-Page, Universal GDFlix)")
     parser.add_argument("--extract-url", type=str, help="Universal mode: Extract GDFlix links from ANY URL")
+    parser.add_argument("--search", type=str, help="Search movies/web series by keyword")
     parser.add_argument("--latest", action="store_true", help="Scrape all new & latest movies across homepage and top categories")
+    parser.add_argument("--home", action="store_true", help="Scrape homepage popular & latest movies")
     parser.add_argument("--list-categories", action="store_true", help="List all available categories on the homepage")
     parser.add_argument("--category", type=str, default="Bollywood Movies", help="Category name or slug to scrape")
     parser.add_argument("--start-page", type=int, default=1, help="Starting page number")
@@ -599,6 +663,24 @@ def main():
         for idx, res in enumerate(results, 1):
             print(f"{idx}. [{res['label']}] -> {res['gdflix_url']}")
         print("=========================================================================\n")
+        return
+
+    if args.search:
+        movie_items = scraper.search_movies(args.search)
+        detailed = scraper.scrape_movies_concurrently(movie_items)
+        scraper.save_to_json(detailed, args.out_json)
+        scraper.save_to_markdown(detailed, args.out_md, title_header=f"SkyMoviesHD Search Results: {args.search}")
+        print(f"\n✅ Scraped {len(detailed)} search results for '{args.search}'!")
+        return
+
+    if args.home:
+        data = scraper.get_homepage_content()
+        detailed_pop = scraper.scrape_movies_concurrently(data["popular_movies"])
+        detailed_lat = scraper.scrape_movies_concurrently(data["latest_movies"])
+        all_home = detailed_pop + detailed_lat
+        scraper.save_to_json(all_home, args.out_json)
+        scraper.save_to_markdown(all_home, args.out_md, title_header="SkyMoviesHD Homepage Catalog")
+        print(f"\n✅ Scraped {len(all_home)} homepage movies!")
         return
 
     if args.list_categories:
